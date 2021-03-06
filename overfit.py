@@ -4,6 +4,9 @@ import os, sys
 import yaml
 from argparse import ArgumentParser
 from tqdm import tqdm
+from tqdm import trange
+from torchvision import transforms
+
 
 import imageio
 import numpy as np
@@ -62,11 +65,11 @@ def overfit(config, source_image, driving_video, generator, kp_detector, lowres_
     optimizer_kp_detector = torch.optim.Adam(kp_detector.parameters(), lr=train_params['lr_kp_detector'], betas=(0.5, 0.999))
     
     scheduler_generator = MultiStepLR(optimizer_generator, train_params['epoch_milestones'], gamma=0.1,
-                                      last_epoch=start_epoch - 1)
+                                      last_epoch=-1)
 
 
     scheduler_kp_detector = MultiStepLR(optimizer_kp_detector, train_params['epoch_milestones'], gamma=0.1,
-                                        last_epoch=-1 + start_epoch * (train_params['lr_kp_detector'] != 0))
+                                        last_epoch=-1)
 
     for epoch in trange(0, overfit_epochs):
         predictions = []
@@ -80,18 +83,19 @@ def overfit(config, source_image, driving_video, generator, kp_detector, lowres_
 
         for frame_idx in tqdm(range(driving.shape[2])):
             driving_frame = driving[:, :, frame_idx]
-            lowres_frame = driving[:, :, frame_idx]
+            lowres_frame = lowres[:, :, frame_idx]
 
             if not cpu:
                 driving_frame = driving_frame.cuda()
+                lowres_frame = lowres_frame.cuda()
+
             kp_driving = kp_detector(driving_frame)
             kp_norm = normalize_kp(kp_source=kp_source, kp_driving=kp_driving,
                                    kp_driving_initial=kp_driving_initial, use_relative_movement=relative,
                                    use_relative_jacobian=relative, adapt_movement_scale=adapt_movement_scale)
             out = generator(source, kp_source=kp_source, kp_driving=kp_norm)
-
-            resized_prediction = transforms.Resize((256, 256))(prediction)[None] 
-            loss = F.mse_loss(resized_prediction, lowres_frame)
+            resized_prediction = transforms.Resize((256, 256))(out['prediction'])[None] 
+            loss = F.mse_loss(torch.squeeze(resized_prediction, 0), lowres_frame.detach())
             loss.backward()
             
             optimizer_generator.step()
@@ -180,9 +184,10 @@ if __name__ == "__main__":
         pass
     reader.close()
 
-    source_image = resize(source_image, (256, 256))[..., :3]
+    source_image = resize(source_image, (512, 512))[..., :3]
     driving_video = [resize(frame, (256, 256))[..., :3] for frame in driving_video]
-    generator, kp_detector = load_checkpoints(config_path=opt.config, checkpoint_path=opt.checkpoint, cpu=opt.cpu)
+    lowres_video = [resize(frame, (256, 256))[..., :3] for frame in lowres_video]
+    generator, kp_detector, config = load_checkpoints(config_path=opt.config, checkpoint_path=opt.checkpoint, cpu=opt.cpu)
 
     predictions = overfit(config, source_image, driving_video, generator, kp_detector, lowres_video, relative=opt.relative, adapt_movement_scale=opt.adapt_scale, cpu=opt.cpu)
 
